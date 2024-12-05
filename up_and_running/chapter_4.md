@@ -18,6 +18,7 @@ steps that have to be performed on subsequent builds
     - For example, do not run a database and frontend application inside the same container
 - If you want to ensure all future Docker builds never use cache, use the `--no-cache` argument on the build command line.
     - This is a good troubleshooting steps to take if the final artifact is not working exactly as you expect when all other code has not changed.
+- ARG and ENV arguments are powerful in making generic and reusable containers
 
 ## Dockerfile Walkthrough
 
@@ -408,3 +409,28 @@ Hello Bubbletonian. Wish you were here.
 There is real power here. What this means is that your code can stay generic and change its configuration via environment variables. One way this can be beneficial is in local development and testing. Configuration for a database could be setup in your code to use environment variables rather that hard coded values. This means the container used in production can also be used for local testing by only changing values of relevant variables at runtime.
 
 ## Custom Base Images
+
+Choosing the base image for your container can have a large impact on the consistency and size of the resulting artifact. There are times that building your own base image is preferable over a third managed image. The primary reason is that you know exactly what dependencies you need to successfully run your applicaiton. Some third party images may have more software installed than necessary.
+
+A docker container should be seen as an application not as a server. This means that `full size` images of Debian or Ubuntu are, in most cases, unnecessary. SSH or compilers are not necessry to exist in the final container image.
+
+What this all boils down to is that we would most likely be starting off with a slim version of Debian or Alpine Linux to get just enough of what we need. This is primarily due to the reason that the artifacts Bubble creates rely upon shared libraries. Our code may not compile down to a static binary.
+
+As a side note, if your code can compile down to a static binary you may be able to use what is called a `SCRATCH` base image which under the covers is nothing. The resulting image would be just your application so the Docker container size is the size of your image.
+
+**NOTE:** The book is a bit of out of date regarding DNS problems with Alpine Linux on page 61. Alpine Linux is based off of the musl libraries rather then glibc. There was a significant number of years where this was a problem when it comes to DNS resolution.
+
+Jumping into the DNS world for a moment.
+
+DNS primarily works on the UDP protocol but if a response is too large the DNS communication will transition to using TCP. In past years musl libraries did not support this transition to TCP thus any DNS responses that were above a certain size would get dropped on the floor and applications would throw DNS resolution errors.
+
+The musl libraries have solved this problem and Alpine Linux is much more stable when it comes to being a standard for base images.
+
+Back to the Docker world now.
+
+## Storing Images
+
+If you only ever plan on building and running images on one computer this section will not mean much to you but in neary every case, this is not reality. The build and running of an image usually happen on separate systems which means there nees to be a central registry to store the resulting artifacts.
+
+### Public Registries
+
