@@ -12,7 +12,8 @@
     - [Amazon Elastic Container Registry](https://gallery.ecr.aws/)
         - May never have as many images that would be found on Docker Hub
         - Not affected by rate limits that we have encountered
-- The order of commands in your Dockerfile can impact the speed of builds. Move the commands that change to the bottom of the Dockerfile. This will limit the number of steps that have to be performed on subsequent builds
+- The order of commands in your Dockerfile can impact the speed of builds. Move the commands that change to the bottom of the Dockerfile. This will limit the number of var DEFAULT_WHO = "World";
+steps that have to be performed on subsequent builds
 - It is best to only run a single process inside a container rather that more than one. This makes the container much easier to scale horizontally.
     - For example, do not run a database and frontend application inside the same container
 - If you want to ensure all future Docker builds never use cache, use the `--no-cache` argument on the build command line.
@@ -323,3 +324,87 @@ $ docker container run --rm -d -p 9000:8080 example/docker-node-hello:latest
 $ curl http://localhost:9000
 Hello World. Wish you were here.
 ```
+
+## Build Arguments
+
+If you recall in the Dockerfile in the `docker-node-hello` repo there are a couple lines that look like this.
+
+```
+ARG email="anna@example.com"
+LABEL "maintainer"=$email
+```
+
+Pay particular attention to the `ARG` line. The `ARG` argument means that the value can be changed via a build argument when building a Docker container. Note `ARG` is configuring a value called `email`. We can also see that `email` is a variable on the `LABEL maintainer` line. This means the `maintainer` `LABEL` can be changed at build time.
+
+We can see the current value of the maintainer `LABEL` in the docker container we built earlier like this.
+
+Using docker the output will look similar to this:
+
+```
+❯ docker inspect example/docker-node-hello:latest | grep maintainer
+                    "maintainer": "anna@example.com",
+               "maintainer": "anna@example.com",
+
+```
+
+Using podman the output looks like this:
+
+```
+❯ docker inspect localhost/example/docker-node-hello:latest | grep maintainer
+                    "maintainer": "anna@example.com",
+               "maintainer": "anna@example.com",
+```
+
+Since `maintainer` is a build argument we can change it.
+
+```
+docker image build --build-arg email=me@example.com -t example/docker-node-hello:latest .
+```
+
+Checking the value of maintainer we now see the following:
+
+```
+❯ docker inspect localhost/example/docker-node-hello:latest | grep maintainer
+                    "maintainer": "me@example.com",
+               "maintainer": "me@example.com",
+                    "created_by": "/bin/sh -c #(nop) LABEL \"maintainer\"=$email",
+```
+
+This example is only showing a `LABEL` being changed but what a build argument means is that anything in the docker container could be made more generic and changed at build time.
+
+## Environment Variables as configuration
+
+We know that if a Dockerfile contains `ARG` lines it means we can change values at build time, it is als possible to change environment variable values are run time. These run time changes are managed by entries in a Dockerfile that use the `ENV` argument.
+
+In the `index.js` code we see the following. Notice the `WHO` variable value can be set if the environment variable `WHO` is configured. If it is not not configured it falls back to the value `World`.
+
+```
+var DEFAULT_WHO = "World";
+
+var WHO = process.env.WHO || DEFAULT_WHO;
+
+// App
+var app = express();
+app.get('/', function (req, res) {
+  res.send('Hello ' + WHO + '. Wish you were here.\n');
+});
+```
+
+If you recall when we ran the container previously the output message when we used curl or your web browser was:
+
+```
+Hello World. Wish you were here.
+```
+
+Let's set the environment variable for `WHO` to be `Bubbletonian`.
+
+```
+❯ docker container run --env WHO="Bubbletonian" --rm -d -p 9000:8080 example/docker-node-hello:latest
+
+❯ curl http://localhost:9000
+Hello Bubbletonian. Wish you were here.
+```
+
+There is real power here. What this means is that your code can stay generic and change its configuration via environment variables. One way this can be beneficial is in local development and testing. Configuration for a database could be setup in your code to use environment variables rather that hard coded values. This means the container used in production can also be used for local testing by only changing values of relevant variables at runtime.
+
+## Custom Base Images
