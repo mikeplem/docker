@@ -397,13 +397,13 @@ If you recall when we ran the container previously the output message when we us
 Hello World. Wish you were here.
 ```
 
-Let's set the environment variable for `WHO` to be `Bubbletonian`.
+Let's set the environment variable for `WHO` to be `Human`.
 
 ```
-❯ docker container run --env WHO="Bubbletonian" --rm -d -p 9000:8080 example/docker-node-hello:latest
+❯ docker container run --env WHO="Human" --rm -d -p 9000:8080 example/docker-node-hello:latest
 
 ❯ curl http://localhost:9000
-Hello Bubbletonian. Wish you were here.
+Hello Human. Wish you were here.
 ```
 
 There is real power here. What this means is that your code can stay generic and change its configuration via environment variables. One way this can be beneficial is in local development and testing. Configuration for a database could be setup in your code to use environment variables rather that hard coded values. This means the container used in production can also be used for local testing by only changing values of relevant variables at runtime.
@@ -414,7 +414,7 @@ Choosing the base image for your container can have a large impact on the consis
 
 A docker container should be seen as an application not as a server. This means that `full size` images of Debian or Ubuntu are, in most cases, unnecessary. SSH or compilers are not necessry to exist in the final container image.
 
-What this all boils down to is that we would most likely be starting off with a slim version of Debian or Alpine Linux to get just enough of what we need. This is primarily due to the reason that the artifacts Bubble creates rely upon shared libraries. Our code may not compile down to a static binary.
+What this all boils down to is that we would most likely be starting off with a slim version of Debian or Alpine Linux to get just enough of what we need. This is primarily due to the reason that the artifacts we creates rely upon shared libraries. Our code may not compile down to a static binary.
 
 As a side note, if your code can compile down to a static binary you may be able to use what is called a `SCRATCH` base image which under the covers is nothing. The resulting image would be just your application so the Docker container size is the size of your image.
 
@@ -430,7 +430,307 @@ Back to the Docker world now.
 
 ## Storing Images
 
-If you only ever plan on building and running images on one computer this section will not mean much to you but in neary every case, this is not reality. The build and running of an image usually happen on separate systems which means there nees to be a central registry to store the resulting artifacts.
+If you only ever plan on building and running images on one computer this section will not mean much to you but in nearly every case, this is not reality. The build and running of an image usually happens on separate systems which means there needs to be a central registry to store the resulting artifacts.
+
+The images can be stored in either Public or Private registries.
 
 ### Public Registries
 
+A public registry is exactly what is sounds like. Images stored on it can be shared to others on the internet. Depending on the registry provider, they may provide the ability for images to be private. Some very well known docker registries are:
+
+- [Docker Hub](https://hub.docker.com)
+- [Github Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-docker-registry)
+- [Red Hat's Quay.io](https://quay.io)
+- [Google's Artifact Registry](https://cloud.google.com/artifact-registry/docs)
+
+While it may not be as well known as those listed above, [AWS also has their own registry](https://gallery.ecr.aws/). The AWS registry is called `Elastic Container Registry (ECR)`.
+
+A benefit to use a managed registry like those above is that we do not have to manage the infrastructure needed to support the registry. A flipside to this is that we are impacted by internet latencies. The larger a docker image is means it can take longer to download if the registry is on the other side of the world. This is another reason to make docker images as small as possible.
+
+### Private Registries
+
+A private registry gives all the functionality of a public registry but we control the infrastructure. We ensure that only our network can reach the registry. This can provide a valuable security protection in the event secrets were stored either by accident or necessity in a required docker container.
+
+Docker [provides their own container](https://hub.docker.com/_/registry) for hosting a private docker registry. For our needs we would be using private registries in AWS ECR so we don't have to manage our own infrastructure.
+
+**IMPORTANT:** In the event that we need to spin up our registry, we must keep in mind that the infrastructure used to host the registry MUST be independent of all other infrastructure. I know this from experience. A previous job had a self managed Kubernetes (K8s) cluster which had been originally built using images hosted from Docker hub. Once the infrastructure was up and running for many months they wanted to host their own registry. It was running in the K8s cluster. Everything was fine until the day the cluster crashed and all services were down. As you can imagine it was very difficult trying to spin up a K8s cluster with no registry. The fix was to create an EC2 instance that only ran the docker registry.
+
+**NOTE:** In that same job the managment of the cluster became a bit of pain when old images needed to be removed. That job used the Docker provided registry. Things may have changed in over 5 years but at the time the process to remove old images was as follows:
+
+- Put the registry into maintenance mode which requires a service restart
+    - Maintenenace mode means no images can be written
+- Run a garbage collection process that could take several hours
+- Disable maintenance mode and restart the service
+
+### Authenticating to a Registry
+
+Since our use case is pretty limited compared to the book, I will not be covering creating or authenticating to Docker Hub. However, the process of logging into AWS ECR will be covered since it is relevant to us.
+
+Since we use private registries inside AWS it is necessary that we login with docker cli. The standard way using the AWS CLI is as follows:
+
+
+```
+aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+```
+
+There are two pieces of information that are necessary to be known.
+
+- $REGION - would be something like us-west-2
+- $AWS_ACCOUNT_ID - would be the numeric value of the AWS account the registry is stored.
+
+In order to be able to push images to ECR the proper permissions are necessary. At minimum, the account logging in needs the following. These permissions allow for the listing, describing, downloading, and uploading of images from a specific registry.
+
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:CompleteLayerUpload",
+                "ecr:DescribeImages",
+                "ecr:DescribeImageScanFindings",
+                "ecr:DescribeRepositories",
+                "ecr:GetAuthorizationToken",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:GetLifecyclePolicy",
+                "ecr:GetLifecyclePolicyPreview",
+                "ecr:GetRepositoryPolicy",
+                "ecr:InitiateLayerUpload",
+                "ecr:ListImages",
+                "ecr:ListTagsForResource",
+                "ecr:PutImage",
+                "ecr:UploadLayerPart",
+            ],
+            "Resource": "arn:aws:ecr:region:111122223333:repository/repository-name"
+        },
+        {
+            "Effect": "Allow",
+            "Action": "ecr:GetAuthorizationToken",
+            "Resource": "*"
+        }
+    ]
+}
+```
+
+### Pusing Images
+
+Most of the information from the book is going to skipped in these notes since I just want to cover concepts.
+
+A key take away with pushing an image is knowing that the tag of the image is what determines where the container will be pushed. If a fully qualified domain name (FQDN) is not provided the image will attempt to be uploaded to Docker Hub.
+
+In order to push to AWS ECR the image must be tagged in the following way:
+
+```
+$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/repository-name:tag
+```
+
+The tagging can be done in a couple of ways.
+
+#### Tag At Build
+
+In a previous example we saw the tag at build time.
+
+```
+docker image build -t example/docker-node-hello:latest .
+```
+
+For our purposes we would tag images for ECR like this.
+
+```
+docker image build -t $AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/repository-name:tag .
+```
+
+#### Tag After Build
+
+There are two ways to tag an image after a build. You can either use the image hash or the existing tag on an image. The following example is using the image hash but the steps are exactly the same way with an existing image.
+
+In a preivous example the end of the build looked like this.
+
+```
+Successfully tagged localhost/example/docker-node-hello:latest
+f25dcfc6637690e93eb2711c54e8441ddd19aae4f575e057a0bae51f0805aca1
+```
+
+The docker container could be tagged thusly for AWS ECR:
+
+```
+docker image tag f25dcfc6637690e93eb2711c54e8441ddd19aae4f575e057a0bae51f0805aca1 $AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/repository-name:tag
+```
+
+Here is a more concrete example for our previous work.
+
+List our existing docker images. There may be some differences here than what you see on your screen.
+
+```
+$ docker images
+REPOSITORY                           TAG         IMAGE ID      CREATED        SIZE
+localhost/example/docker-node-hello  latest      9b2490cea318  3 days ago     1.05 GB
+<none>                               <none>      f25dcfc66376  6 days ago     1.05 GB
+docker.io/library/node               18.13.0     b68a472583ef  23 months ago  1.02 GB
+```
+
+Notice the image ID for `localhost/example/docker-node-hello` is `9b2490cea318`. Let's say I want to tag that image for AWS ECR.
+
+```
+$ docker image tag 9b2490cea318 1234567890.dkr.ecr.us-west-2.amazonaws.com/docker-node-hello:latest
+
+$ docker images
+REPOSITORY                                                    TAG         IMAGE ID      CREATED        SIZE
+localhost/example/docker-node-hello                           latest      9b2490cea318  3 days ago     1.05 GB
+1234567890.dkr.ecr.us-west-2.amazonaws.com/docker-node-hello  latest      9b2490cea318  3 days ago     1.05 GB
+<none>                                                        <none>      f25dcfc66376  6 days ago     1.05 GB
+docker.io/library/node                                        18.13.0     b68a472583ef  23 months ago  1.02 GB
+```
+
+## Optimizing Images
+
+Previously, it was stated that it is best to keep images as small as possible. The smaller an image is the faster it can be uploaded to a registry, the faster it can be downloaded from a registry, and the least amount of disk space is used up. It can also be a benefit from a security perspective because there is less software that has to be kept up to date.
+
+### Keeping Images Small
+
+We will take a look at the author provided Go application container.
+
+```
+docker container run --rm -d -p 8080:8080 spkane/scratch-helloworld
+```
+
+When using podman, the image needs to be fully qualified.
+
+```
+$ docker container run --rm -d -p 8080:8080 spkane/scratch-helloworld
+Error: short-name "spkane/scratch-helloworld" did not resolve to an alias and no unqualified-search registries are defined in "/etc/containers/registries.conf"
+
+$  docker container run --rm -d -p 8080:8080 docker.io/spkane/scratch-helloworld
+Trying to pull docker.io/spkane/scratch-helloworld:latest...
+Getting image source signatures
+Copying blob 702599c1d55c done  
+Copying config 8aa4ea322c done  
+Writing manifest to image destination
+Storing signatures
+77c18466eb23b315d920445e9352d99e52c4074039c97dbf31eabb973e9c1180
+```
+
+We will verify the container is running.
+
+```
+$ curl http://localhost:8080
+Hello World from Go in minimal Docker container
+```
+
+We can see the image size by looking at our images. The application size is 4.5 MB!
+
+```
+$ docker images
+REPOSITORY                                                    TAG         IMAGE ID      CREATED        SIZE
+localhost/example/docker-node-hello                           latest      9b2490cea318  3 days ago     1.05 GB
+1234567890.dkr.ecr.us-west-2.amazonaws.com/docker-node-hello  latest      9b2490cea318  3 days ago     1.05 GB
+<none>                                                        <none>      f25dcfc66376  7 days ago     1.05 GB
+docker.io/spkane/scratch-helloworld                           latest      8aa4ea322c2b  18 months ago  4.57 MB <<<<
+docker.io/library/node                                        18.13.0     b68a472583ef  23 months ago  1.02 GB
+```
+
+Let's go a bit deeper into the contents of the container. We need to know the contianer id. We can do this a couple of ways.
+
+```
+$ docker container ls -l
+CONTAINER ID  IMAGE                                       COMMAND      CREATED        STATUS            PORTS                   NAMES
+77c18466eb23  docker.io/spkane/scratch-helloworld:latest  /helloworld  2 minutes ago  Up 2 minutes ago  0.0.0.0:8080->8080/tcp  competent_swanson
+```
+
+or 
+
+```
+$ docker ps
+CONTAINER ID  IMAGE                                       COMMAND      CREATED        STATUS            PORTS                   NAMES
+77c18466eb23  docker.io/spkane/scratch-helloworld:latest  /helloworld  4 minutes ago  Up 4 minutes ago  0.0.0.0:8080->8080/tcp  competent_swanson
+```
+
+We can export the contents of the images.
+
+```
+$ docker container export 77c18466eb23 -o web-app.tar
+
+$ ls -lh web-app.tar
+-rw-r--r-- 1 mike mike 4.4M Dec  8 09:32 web-app.tar
+```
+
+Let's look at the contents of the exported tar file. We can see there is only one file in the container, `helloworld`, and it is a little over 4 MB in size. All the zero size files/directories must exist in every container and they are placed there at build time. You may see a file called `.dockerenv` rather than `.containerenv`. This is here as I am running podman.
+
+```
+$ tar -tvf web-app.tar 
+drwxr-xr-t 0/0               0 2024-12-08 09:27 dev/
+drwxr-xr-x 0/0               0 2024-12-08 09:27 etc/
+-rwx------ 0/0               0 2024-12-08 09:27 etc/hostname
+-rwx------ 0/0               0 2024-12-08 09:27 etc/hosts
+lrwxrwxrwx 0/0               0 2024-12-08 09:27 etc/mtab -> /proc/mounts
+-rwx------ 0/0               0 2024-12-08 09:27 etc/resolv.conf
+-rwxr-xr-x 0/0         4562944 2023-05-19 16:20 helloworld
+drwxr-xr-x 0/0               0 2024-12-08 09:27 proc/
+drwxr-xr-x 0/0               0 2024-12-08 09:27 run/
+-rwx------ 0/0               0 2024-12-08 09:27 run/.containerenv
+drwxr-xr-x 0/0               0 2024-12-08 09:27 sys/
+```
+
+**Container Tangent**
+
+Let's take a tangent here and actually run the binary inside the container.
+
+```
+$ mkdir hold
+
+$ cd hold
+
+$ tar xvf ../web-app.tar 
+dev/
+etc/
+etc/hostname
+etc/hosts
+etc/mtab
+etc/resolv.conf
+helloworld
+proc/
+run/
+run/.containerenv
+sys/
+
+$ ls
+dev  etc  helloworld  proc  run  sys
+
+$ file helloworld 
+helloworld: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=4GUXiaAyP7tVTJYbCemo/NQfK0DZLsTjKYIcZetKG/9CRkW306TL8WhmvPxCyl/i6Ercl4doZEMS-zwsi9-, stripped
+
+$ ./helloworld 
+Started, serving at 8080
+panic: ListenAndServe: listen tcp :8080: bind: address already in use
+
+goroutine 1 [running]:
+main.main()
+        /go/pkg/mod/github.com/spkane/scratch-helloworld@v0.0.0-20230113184334-a0a65c63cb29/helloworld.go:18 +0xeb
+
+$ docker ps
+CONTAINER ID  IMAGE                                       COMMAND      CREATED        STATUS            PORTS                   NAMES
+77c18466eb23  docker.io/spkane/scratch-helloworld:latest  /helloworld  9 minutes ago  Up 9 minutes ago  0.0.0.0:8080->8080/tcp  competent_swanson
+
+$ docker stop competent_swanson
+competent_swanson
+
+$ ./helloworld 
+Started, serving at 8080
+```
+
+In another terminal window.
+
+```
+$ curl localhost:8080
+Hello World from Go in minimal Docker container
+```
+
+**Back To The Book**
+
+I am going to skip the investigation into the docker image and leave that as an excersize to the reader.
+
+### Multistage Builds
