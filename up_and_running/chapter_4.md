@@ -19,6 +19,8 @@ steps that have to be performed on subsequent builds
 - If you want to ensure all future Docker builds never use cache, use the `--no-cache` argument on the build command line.
     - This is a good troubleshooting steps to take if the final artifact is not working exactly as you expect when all other code has not changed.
 - ARG and ENV arguments are powerful in making generic and reusable containers
+- Multistage builds are imports functions to use to make containers as small as possible
+
 
 ## Dockerfile Walkthrough
 
@@ -731,6 +733,178 @@ Hello World from Go in minimal Docker container
 
 **Back To The Book**
 
-I am going to skip the investigation into the docker image and leave that as an excersize to the reader.
+I am going to skip the investigation into the docker image and leave that as an exercise to the reader. The reason is that we skipped the steps of installing a Docker server and those steps are necessary for this section. While I believe these steps are useful to understand, I believe that trying to get an early understanding of Docker does not require this level of detail starting out.
 
 ### Multistage Builds
+
+In traditional build processes, there may be artifacts/outputs generated during the compilation process that are not needed for the final application to run. For example, in a C program, the object file created during the linker operation can be thrown away once executable has been created. If we were creating a container for a compiled application the object file does not need to exist in the final container. A multistage build allows for the separation of compilation from application usage. You can copy the resulting application to a fresh container that does not contain any of the needed software to compile the application.
+
+The example from the book covers a Go application. Go and Rust are applications that compile to static binaries which mean that shared libraries are not needed and the resulting image size can be very small.
+
+Looking closely at the Dockerfile we see two distinct sections separated by the FROM lines.
+
+```
+# Build container
+FROM docker.io/golang:alpine as builder
+RUN apk update && \
+    apk add git && \
+    CGO_ENABLED=0 go install -a -ldflags '-s' \
+    github.com/spkane/scratch-helloworld@latest
+
+# Production container
+FROM scratch
+COPY --from=builder /go/bin/scratch-helloworld /helloworld
+EXPOSE 8080
+CMD ["/helloworld]
+```
+
+The compilation step install git which has dependencies as well as the source code needed for the hello world application. Notice the `as builder` text at the end of the first FROM line. This labeling allows later builds to copy files from that build step into a new build step. We can see that copy operation by looking at the following line:
+
+```
+COPY --from=builder /go/bin/scratch-helloworld /helloworld
+```
+
+The `/go/bin/scratch-helloworld` file path points to the location of the just built binary and the `/helloworld` path is to the final location in the new container.
+
+
+When we build this container we see that quite a lot of software is installed that we don't need to run the final application.
+
+```
+$ docker image build -t scratch-go .
+[1/2] STEP 1/2: FROM docker.io/golang:alpine AS builder
+Trying to pull docker.io/library/golang:alpine...
+Getting image source signatures
+Copying blob 06f05ace1117 done  
+Copying blob 34d97d9959dd done  
+Copying blob 4f4fb700ef54 done  
+Copying blob 38a8310d387e skipped: already exists  
+Copying blob 3739efb98791 done  
+Copying config 8a6d980675 done  
+Writing manifest to image destination
+Storing signatures
+[1/2] STEP 2/2: RUN apk update &&     apk add git &&     CGO_ENABLED=0 go install -a -ldflags '-s'     github.com/spkane/scratch-helloworld@latest
+fetch https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/APKINDEX.tar.gz
+fetch https://dl-cdn.alpinelinux.org/alpine/v3.21/community/x86_64/APKINDEX.tar.gz
+v3.21.0-38-g75e920e2df8 [https://dl-cdn.alpinelinux.org/alpine/v3.21/main]
+v3.21.0-65-g124a4988cc4 [https://dl-cdn.alpinelinux.org/alpine/v3.21/community]
+OK: 25386 distinct packages available
+(1/12) Installing brotli-libs (1.1.0-r2)
+(2/12) Installing c-ares (1.34.3-r0)
+(3/12) Installing libunistring (1.2-r0)
+(4/12) Installing libidn2 (2.3.7-r0)
+(5/12) Installing nghttp2-libs (1.64.0-r0)
+(6/12) Installing libpsl (0.21.5-r3)
+(7/12) Installing zstd-libs (1.5.6-r1)
+(8/12) Installing libcurl (8.11.0-r2)
+(9/12) Installing libexpat (2.6.4-r0)
+(10/12) Installing pcre2 (10.43-r0)
+(11/12) Installing git (2.47.1-r0)
+(12/12) Installing git-init-template (2.47.1-r0)
+Executing busybox-1.37.0-r8.trigger
+OK: 19 MiB in 28 packages
+go: downloading github.com/spkane/scratch-helloworld v0.0.0-20230113184334-a0a65c63cb29
+--> e8352c4f546
+[2/2] STEP 1/4: FROM scratch
+[2/2] STEP 2/4: COPY --from=builder /go/bin/scratch-helloworld /helloworld
+--> ec9b3ef90d1
+[2/2] STEP 3/4: EXPOSE 8080
+--> fee3d0d1244
+[2/2] STEP 4/4: CMD ["/helloworld]
+[2/2] COMMIT
+--> 3a6b63c5ee5
+3a6b63c5ee5d53b8ed49c3332e70c3ea3b163afba2e54fdce0e19b673002e295
+```
+
+If we look at the resulting images we can a stark difference in size.
+
+```
+$ docker images
+localhost/scratch-go                                          latest      3a6b63c5ee5d  2 minutes ago  5.08 MB
+<none>                                                        <none>      e8352c4f5467  2 minutes ago  351 MB
+```
+
+We built `localhost/scratch-go` which is 5 MB in size but the `<none>` container which does not have a tag because it is a part of the multistage build is 350 MB! Imagine that we did not have the multistage build. The final container would be 356 MB.
+
+### Layers Are Additive
+
+Understanding this concept is important in understanding how to make your container images as small as possible. If a layer in your Dockerfile installs a lot of dependencies or caches software via a RUN line you cannot remove that software if you run a second to perform a clean up on a second RUN line. This is because each layer is immutable. A later layer cannot delete files in a previous layer.
+
+The book's example shows this clearly. The Dockerfile looks like this.
+
+NOTE: When running the different build steps below, make sure to remove the resulting images to make sure you are not using any cached layers as the cached layers may still have larger layers than you expect.
+
+```
+FROM docker.io/fedora
+RUN dnf install -y httpd
+CMD ["/usr/sbin/htpd", "-DFOREGROUND"]
+```
+
+If we look at the history of the image we can see the size of each layer.
+
+```
+$ docker history fedora
+ID            CREATED         CREATED BY                                     SIZE        COMMENT
+2ab7add90b54  10 seconds ago  /bin/sh -c #(nop) CMD ["/usr/sbin/htpd", "...  0 B         FROM 2ab7add90b54
+<missing>     12 seconds ago  /bin/sh -c dnf install -y httpd                168 MB      FROM docker.io/library/fedora:latest
+aa6787b90fe6  5 weeks ago     CMD ["/bin/bash"]                              0 B         buildkit.dockerfile.v0
+<missing>     5 weeks ago     ADD fedora-20241031.tar / # buildkit           163 MB      buildkit.dockerfile.v0
+<missing>     5 weeks ago     ENV DISTTAG=f41container FGC=f41 FBR=f41       0 B         buildkit.dockerfile.v0
+<missing>     5 weeks ago     LABEL maintainer=Clement Verna <cverna@fed...  0 B         buildkit.dockerfile.v0
+```
+
+We can see that the base Fedora image is 163 MB in size and the Apache web server is 168 MB in size. We know that the Apache web server itself is not that large but there are a lot of dependencies that get installed as well. By default, nealy all Linux distributions will cache downloaded programs to save on download bandwidth later. This is bad for us though.
+
+Let's clean up that space.
+
+```
+FROM docker.io/fedora
+RUN dnf install -y httpd
+RUN dnf clean all
+CMD ["/usr/sbin/htpd", "-DFOREGROUND"]
+```
+
+As the title of this section states, layers are additive.
+
+```
+$ docker history fedora
+ID            CREATED        CREATED BY                                     SIZE        COMMENT
+b0218b510314  4 seconds ago  /bin/sh -c #(nop) CMD ["/usr/sbin/htpd", "...  0 B         FROM b0218b510314
+<missing>     6 seconds ago  /bin/sh -c dnf clean all                       790 kB      FROM 61310efbcecf
+61310efbcecf  9 seconds ago  /bin/sh -c dnf install -y httpd                168 MB      FROM docker.io/library/fedora:latest
+aa6787b90fe6  5 weeks ago    CMD ["/bin/bash"]                              0 B         buildkit.dockerfile.v0
+<missing>     5 weeks ago    ADD fedora-20241031.tar / # buildkit           163 MB      buildkit.dockerfile.v0
+<missing>     5 weeks ago    ENV DISTTAG=f41container FGC=f41 FBR=f41       0 B         buildkit.dockerfile.v0
+<missing>     5 weeks ago    LABEL maintainer=Clement Verna <cverna@fed...  0 B         buildkit.dockerfile.v0
+```
+
+Since we know every command is a layer we need to perform the cleanup on the same line as the install of the Apache web server.
+
+```
+FROM docker.io/fedora
+RUN dnf install -y httpd && dnf clean all
+CMD ["/usr/sbin/htpd", "-DFOREGROUND"]
+```
+
+As we can see the Apache software layer is now 82.5 MB which means over 80 MB of space was taken up only for the caching of packages. This is uncesssary!
+
+```
+$ docker history fedora
+ID            CREATED             CREATED BY                                     SIZE        COMMENT
+7589543ab053  About a minute ago  /bin/sh -c #(nop) CMD ["/usr/sbin/htpd", "...  0 B         FROM 7589543ab053
+<missing>     About a minute ago  /bin/sh -c dnf install -y httpd && dnf cle...  82.5 MB     FROM docker.io/library/fedora:latest
+aa6787b90fe6  5 weeks ago         CMD ["/bin/bash"]                              0 B         buildkit.dockerfile.v0
+<missing>     5 weeks ago         ADD fedora-20241031.tar / # buildkit           163 MB      buildkit.dockerfile.v0
+<missing>     5 weeks ago         ENV DISTTAG=f41container FGC=f41 FBR=f41       0 B         buildkit.dockerfile.v0
+<missing>     5 weeks ago         LABEL maintainer=Clement Verna <cverna@fed...  0 B         buildkit.dockerfile.v0
+```
+
+### Layer Caching
+
+Since each command is a layer in a Dockerfile we can use this to our advantage. Docker will utilize this caching to speed up subsequent container builds. This can have a dramatic increase in speed. In my testing, using podman, I could not reproduce the results found in the book as changing the order of the COPY and RUN operations did not produce any significant difference. However, the concept is still a good idea from a structure standpoint. It is best to keep the operations that change very little at the top of the Dockerfile.
+
+### Directory Caching
+
+This is the most relevant to use due to the extensive usage of npm. Being able to cache the directories used for installing software can greatly increase build times while not increasing image size since the cached directories are mounted in such a way as they do not exist in the final container image.
+
+In building the open-mastermind application we see its size is 323 MB and we can infer that a large portion of the size is taken up by build dependencies.
+
