@@ -20,6 +20,9 @@ steps that have to be performed on subsequent builds
     - This is a good troubleshooting steps to take if the final artifact is not working exactly as you expect when all other code has not changed.
 - ARG and ENV arguments are powerful in making generic and reusable containers
 - Multistage builds are imports functions to use to make containers as small as possible
+- Layer and directory caching are powerful tools to help speed up builds
+- Directory caching is a great way to save on container space
+- Multiarchitecture builds are a great way to build for multiple CPU architectures without needing to run more than one command.
 
 
 ## Dockerfile Walkthrough
@@ -344,7 +347,7 @@ We can see the current value of the maintainer `LABEL` in the docker container w
 Using docker the output will look similar to this:
 
 ```
-❯ docker inspect example/docker-node-hello:latest | grep maintainer
+$ docker inspect example/docker-node-hello:latest | grep maintainer
                     "maintainer": "anna@example.com",
                "maintainer": "anna@example.com",
 
@@ -353,7 +356,7 @@ Using docker the output will look similar to this:
 Using podman the output looks like this:
 
 ```
-❯ docker inspect localhost/example/docker-node-hello:latest | grep maintainer
+$ docker inspect localhost/example/docker-node-hello:latest | grep maintainer
                     "maintainer": "anna@example.com",
                "maintainer": "anna@example.com",
 ```
@@ -367,7 +370,7 @@ docker image build --build-arg email=me@example.com -t example/docker-node-hello
 Checking the value of maintainer we now see the following:
 
 ```
-❯ docker inspect localhost/example/docker-node-hello:latest | grep maintainer
+$ docker inspect localhost/example/docker-node-hello:latest | grep maintainer
                     "maintainer": "me@example.com",
                "maintainer": "me@example.com",
                     "created_by": "/bin/sh -c #(nop) LABEL \"maintainer\"=$email",
@@ -402,9 +405,9 @@ Hello World. Wish you were here.
 Let's set the environment variable for `WHO` to be `Human`.
 
 ```
-❯ docker container run --env WHO="Human" --rm -d -p 9000:8080 example/docker-node-hello:latest
+$ docker container run --env WHO="Human" --rm -d -p 9000:8080 example/docker-node-hello:latest
 
-❯ curl http://localhost:9000
+$ curl http://localhost:9000
 Hello Human. Wish you were here.
 ```
 
@@ -904,7 +907,340 @@ Since each command is a layer in a Dockerfile we can use this to our advantage. 
 
 ### Directory Caching
 
-This is the most relevant to use due to the extensive usage of npm. Being able to cache the directories used for installing software can greatly increase build times while not increasing image size since the cached directories are mounted in such a way as they do not exist in the final container image.
+**NOTE:** Due to features not included in podman I had to spin up a VM to run native Docker.
 
-In building the open-mastermind application we see its size is 323 MB and we can infer that a large portion of the size is taken up by build dependencies.
+In order to make use of directory caching an environment variable is needed to be set to tell [Docker to use BuildKit](https://docs.docker.com/build/buildkit/) which is an improved backend that provides many new features.
 
+To use BuildKit, set the proper environment variable. You only need to type this once into the same terminal window you are running docker commands.
+
+```
+export DOCKER_BUILDKIT=1
+```
+
+This is the most relevant to use due to the extensive usage of npm. Being able to cache the directories used for installing software can greatly increase build times while not increasing image size since the cached directories are mounted in such a way as they do not exist in the final container image. The way this works is by bind mounting a directory in a specific way such that the directory for the dependencies only exists during the build. This means that the resulting container will not have any of the dependency software installed.
+
+In building the open-mastermind application and looking at is resulting size we see it is 312 MB.
+
+```
+# docker image ls --format "{{ .Size }}" mastermind
+312MB
+```
+
+Now we configure the Dockerfile to use bind mount for directory caching. There are two key items that matter here.
+
+- The `# syntax=docker/dockerfile:1` line at the top tells docker to use new functionality.
+- Update the pip RUN line with `--mount=type=cache,target=/root/.cache` which mounts a host directory into the container.
+
+```
+# syntax=docker/dockerfile:1    
+FROM python:3.9.15-slim-bullseye        
+RUN mkdir /app
+WORKDIR /app       
+COPY . /app                                                                      
+RUN --mount=type=cache,target=/root/.cache pip install -r requirements.txt                  
+WORKDIR /app/mastermind                          
+CMD ["python", "mastermind.py"]
+```
+
+Build a brand new container without caching to make sure we populate the directory cache with all needed dependencies.
+
+```
+# time docker build --no-cache -t mastermind .
+[+] Building 11.2s (14/14) FINISHED                                                                            docker:default
+ => CACHED docker-image://docker.io/docker/dockerfile:1@sha256:db1ff77fb637a5955317c7a3a62540196396d565f3dd5742e76dddbb  0.0s
+ => CACHED [stage-0 1/6] FROM docker.io/library/python:3.9.15-slim-bullseye@sha256:ffc6cb648d6993e7c90abb95c2481eb688a6  0.0s
+ => [stage-0 2/6] RUN mkdir /app                                                                                         0.1s
+ => [stage-0 3/6] WORKDIR /app                                                                                           0.0s
+ => [stage-0 4/6] COPY . /app                                                                                            0.0s
+ => [stage-0 5/6] RUN --mount=type=cache,target=/root/.cache pip install -r requirements.txt                             9.9s
+ => [stage-0 6/6] WORKDIR /app/mastermind                                                                                0.0s 
+real    0m 11.30s                                                                                                             
+user    0m 0.09s
+sys     0m 0.04s
+```
+
+Add `py-events` to the requirements.txt file and build again but this time using caching.
+
+```
+# time docker build -t mastermind .
+[+] Building 0.5s (14/14) FINISHED                                                                             docker:default
+ => CACHED docker-image://docker.io/docker/dockerfile:1@sha256:db1ff77fb637a5955317c7a3a62540196396d565f3dd5742e76dddbb  0.0s
+ => CACHED [stage-0 2/6] RUN mkdir /app                                                                                  0.0s
+ => CACHED [stage-0 3/6] WORKDIR /app                                                                                    0.0s
+ => CACHED [stage-0 4/6] COPY . /app                                                                                     0.0s
+ => CACHED [stage-0 5/6] RUN --mount=type=cache,target=/root/.cache pip install -r requirements.txt                      0.0s
+ => CACHED [stage-0 6/6] WORKDIR /app/mastermind                                                                         0.0s
+real    0m 0.61s
+user    0m 0.04s
+sys     0m 0.03s
+```
+
+We can see the image size got 35 MB smaller even though a dependency was added! This is impressive.
+
+```
+# docker image ls --format "{{ .Size }}" mastermind
+277MB
+```
+
+## Troubleshooting Broken Builds
+
+Being able to troubleshoot a broken build is a useful skill to be able to understand how to quickly solve a problem. A powerful feature of docker is that it is possible to start a shell into a container image layer.
+
+First a broken Dockerfile needs to be created. The `RUN apt-get -y update` is updated to look like `RUN apt-get -y update-all`.
+
+```
+# Originally forked from: git@github.com:gasi/docker-node-hello.git
+FROM docker.io/node:18.13.0
+
+ARG email="anna@example.com"
+LABEL "maintainer"=$email
+LABEL "rating"="Five Stars" "class"="First Class"
+
+USER root
+
+ENV AP /data/app
+ENV SCPATH /etc/supervisor/conf.d
+
+RUN apt-get -y update-all
+
+# The daemons
+RUN apt-get -y install supervisor
+RUN mkdir -p /var/log/supervisor
+
+# Supervisor Configuration
+COPY ./supervisord/conf.d/* $SCPATH/
+
+# Application Code
+COPY *.js* $AP/
+
+WORKDIR $AP
+RUN npm install
+CMD ["supervisord", "-n"]
+```
+
+Attempt the build but disable the new BuildKit functionality so we can understand the old way of troubleshooting. To save space several lines of the build process are removed.
+
+```
+# DOCKER_BUILDKIT=0 docker image build -t hello --no-cache .
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            BuildKit is currently disabled; enable it by removing the DOCKER_BUILDKIT=0
+            environment-variable.
+
+Sending build context to Docker daemon  9.728kB
+Step 1/15 : FROM docker.io/node:18.13.0
+18.13.0: Pulling from library/node
+....
+....
+Step 7/15 : ENV SCPATH /etc/supervisor/conf.d
+ ---> Running in 2410e2fdae61
+ ---> Removed intermediate container 2410e2fdae61
+ ---> 5d53038880f6
+Step 8/15 : RUN apt-get -y update-all
+ ---> Running in 407c13777499
+E: Invalid operation update-all
+The command '/bin/sh -c apt-get -y update-all' returned a non-zero code: 100
+```
+
+Something you do not get from this error is why the `apt-get` command failed. All we know is it failed. We need to know why. In order to interact with the container we need the last known good layer and in the example above its id is `5d53038880f6`.
+
+```
+# docker container run --rm -ti 5d53038880f6 /bin/bash
+root@d632a82dd8ef:/# apt-get -y update-all
+E: Invalid operation update-all
+```
+
+We can see that `upate-all` is not a valid operation for `apt-get`. We can run the proper command in the container to validate a fix before we update the Dockerfile.
+
+```
+# apt-get -y update
+Get:1 http://deb.debian.org/debian bullseye InRelease [116 kB]
+Get:2 http://deb.debian.org/debian-security bullseye-security InRelease [27.2 kB]
+Get:3 http://deb.debian.org/debian bullseye-updates InRelease [44.1 kB]
+Get:4 http://deb.debian.org/debian bullseye/main amd64 Packages [8066 kB]
+Get:5 http://deb.debian.org/debian-security bullseye-security/main amd64 Packages [325 kB]
+Get:6 http://deb.debian.org/debian bullseye-updates/main amd64 Packages [18.8 kB]
+Fetched 8597 kB in 2s (5527 kB/s)                    
+Reading package lists... Done
+```
+
+Revert the Dockfile back to a known good state but break the `npm install` line by updating it to be `npm installer`. Attempt another build but this time we want BuildKit to be enabled. Recall this was configured very early on when we did `export DOCKER_BUILDKIT=1`.
+
+```
+# docker image build -t hello --no-cache .
+[+] Building 3.6s (12/12) FINISHED                                                                             docker:default
+....
+....
+ => ERROR [8/8] RUN npm installer                                                                                        0.3s 
+------                                                                                                                        
+ > [8/8] RUN npm installer:                                                                                                   
+0.330 Unknown command: "installer"                                                                                            
+0.330 
+0.330 Did you mean this?
+0.330     npm install # Install a package
+0.330 
+0.331 To see a list of supported npm commands, run:
+0.331   npm help
+------
+Dockerfile:28
+--------------------
+  26 |     WORKDIR $AP
+  27 |     
+  28 | >>> RUN npm installer
+  29 |     
+  30 |     CMD ["supervisord", "-n"]
+--------------------
+ERROR: failed to solve: process "/bin/sh -c npm installer" did not complete successfully: exit code: 1
+```
+
+The more modern way to attempt to troubleshoot is to use a `target` capbility of a multistage build to split out the parts of the build that work from the parts that don't. By doing this we know once inside the container the environment is configured exactly as necessary.
+
+- Change `FROM docker.io/node:18.13.0` to `FROM docker.io/node:18.13.0 AS deploy`
+- Add a line
+
+```
+WORKDIR $AP
+    
+FROM deploy # this line was added
+RUN npm installer
+```
+
+We expect the build to fail but with the `AS deploy` addition and using BuildKit we can build only the first stage of the multistage build in order to troubleshoot the npm installer problem.
+
+Notice the `--target deploy` addition to the build line.
+
+```
+# docker image build -t hello --no-cache --target deploy .
+```
+
+Just like we did with the old style troubleshooting attempt we can now start an interactive session with the new image that was built.
+
+```
+# docker container run --rm -ti hello /bin/bash
+root@3d63f5f7fcad:/data/app# ls
+index.js  package.json
+root@3d63f5f7fcad:/data/app# npm install
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'formidable@1.0.13',
+npm WARN EBADENGINE   required: { node: '<0.9.0' },
+npm WARN EBADENGINE   current: { node: 'v18.13.0', npm: '8.19.3' }
+npm WARN EBADENGINE }
+npm WARN deprecated mkdirp@0.3.4: Legacy versions of mkdirp are no longer supported. Please update to mkdirp 1.x. (Note that the API surface has changed to use Promises in 1.x.)
+npm WARN deprecated formidable@1.0.13: Please upgrade to latest, formidable@v2 or formidable@v3! Check these notes: https://bit.ly/2ZEqIau
+npm WARN deprecated connect@2.7.9: connect 2.x series is deprecated
+
+added 18 packages, and audited 19 packages in 986ms
+
+8 vulnerabilities (1 low, 1 moderate, 6 high)
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+npm notice 
+npm notice New major version of npm available! 8.19.3 -> 10.9.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v10.9.2
+npm notice Run npm install -g npm@10.9.2 to update!
+npm notice 
+root@3d63f5f7fcad:/data/app# exit
+exit
+```
+
+Either method is valid for troubleshooting and both are valuable tools in the troubleshooting toolbelt.
+
+## Multiarchitecture Builds
+
+When Docker was first released ARM was very early in the server space. This means that nearly every container was being built for x86. However, times have changed and ARM is becoming the dominant player for running containers. They can have a lower cost and have similar it not more performance than a comparable x86 CPU. Prior to multiarchitecture support in Docker it was necessary to have build servers of the different CPU types to build your different containers. This means your buildsystem had to be duplicated.
+
+Enter Docker's multiarchitecture support which removes the need for duplicate build servers.
+
+**NOTE:** You may need to configure your local Docker to support more than one architecture. This is what I ran into. I skipped the section talking about updating the Docker server since we are not running one. We only need to worry about our local builds.
+
+```
+# docker buildx build --platform linux/amd64,linux/arm64 -t wordchain .
+[+] Building 0.0s (0/0)                                                                                        docker:default
+ERROR: Multi-platform build is not supported for the docker driver.
+Switch to a different driver, or turn on the containerd image store, and try again.
+Learn more at https://docs.docker.com/go/build-multi-platform/
+
+# docker buildx create \
+>   --name container-builder \
+>   --driver docker-container \
+>   --bootstrap --use
+[+] Building 12.2s (1/1) FINISHED                                                                                             
+ => [internal] booting buildkit                                                                                         12.2s
+ => => pulling image moby/buildkit:buildx-stable-1                                                                      11.9s
+ => => creating container buildx_buildkit_container-builder0                                                             0.3s
+container-builder
+```
+
+The way this multiarchitecture builds work is by Docker utilize virtualization under the covers to handle the different CPU types. The approach uses [QEMU](https://www.qemu.org/) and [binfmt_misc](https://docs.kernel.org/admin-guide/binfmt-misc.html).
+
+Building for multiple architectures is straight forward in that it only requires using the `--platform` command line argument with a comma separated list of architectures.
+
+```
+# docker buildx build --platform linux/amd64,linux/arm64 -t wordchain .
+[+] Building 160.3s (21/21) FINISHED                                                       docker-container:container-builder
+ => [internal] load build definition from Dockerfile                                                                     0.0s
+ => => transferring dockerfile: 460B                                                                                     0.0s
+ => [linux/amd64 internal] load metadata for docker.io/library/alpine:3.15                                               1.3s
+ => [linux/amd64 internal] load metadata for docker.io/library/golang:1.18-alpine3.15                                    1.4s
+ => [linux/arm64 internal] load metadata for docker.io/library/golang:1.18-alpine3.15                                    1.4s
+ => [linux/arm64 internal] load metadata for docker.io/library/alpine:3.15                                               1.3s
+ => [internal] load .dockerignore                                                                                        0.0s
+ => => transferring context: 93B                                                                                         0.0s
+ => [linux/amd64 build 1/5] FROM docker.io/library/golang:1.18-alpine3.15@sha256:a94d2c2d687adc28a70ca4ae4ca06f6b4b17e  10.5s
+ => [linux/arm64 deploy 1/3] FROM docker.io/library/alpine:3.15@sha256:19b4bcc4f60e99dd5ebdca0cbce22c503bbcff197549d7e1  0.7s
+ => [linux/amd64 deploy 1/3] FROM docker.io/library/alpine:3.15@sha256:19b4bcc4f60e99dd5ebdca0cbce22c503bbcff197549d7e1  0.5s
+ => [linux/arm64 build 1/5] FROM docker.io/library/golang:1.18-alpine3.15@sha256:a94d2c2d687adc28a70ca4ae4ca06f6b4b17e  12.8s
+ => [linux/amd64 build 2/5] RUN apk --no-cache add     bash     gcc     musl-dev     openssl                             4.6s
+ => [linux/arm64 build 2/5] RUN apk --no-cache add     bash     gcc     musl-dev     openssl                             5.9s
+ => [linux/amd64 build 3/5] COPY . /build                                                                                0.1s
+ => [linux/amd64 build 4/5] WORKDIR /build                                                                               0.0s
+ => [linux/amd64 build 5/5] RUN go install github.com/markbates/pkger/cmd/pkger@latest &&     pkger -include /data/wor  56.2s
+ => [linux/arm64 build 3/5] COPY . /build                                                                                0.1s
+ => [linux/arm64 build 4/5] WORKDIR /build                                                                               0.0s
+ => [linux/arm64 build 5/5] RUN go install github.com/markbates/pkger/cmd/pkger@latest &&     pkger -include /data/wo  139.9s
+ => [linux/amd64 deploy 2/3] COPY --from=build /build/wordchain /                                                        0.0s
+ => [linux/arm64 deploy 2/3] COPY --from=build /build/wordchain /                                                        0.0s
+WARNING: No output specified with docker-container driver. Build result will only remain in the build cache. To push result image into registry use --push or to load image into docker use --load
+```
+
+Unfortunatley, we cannot see the result of our build due to not having the image pushed but we can look at the output of the container provided by the author. We can see that three different architectures are supported.
+
+```
+# docker manifest inspect docker.io/spkane/wordchain:latest
+{
+   "schemaVersion": 2,
+   "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+   "manifests": [
+      {
+         "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+         "size": 739,
+         "digest": "sha256:4bd1971f2ed820b4f64ffda97707c27aac3e8eb773a64664126f64933dc5bfc0",
+         "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+         }
+      },
+      {
+         "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+         "size": 739,
+         "digest": "sha256:10aba6975b124143b5812b5c1c2a2bd1250627dddf6989133468c359ce805084",
+         "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+         }
+      },
+      {
+         "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+         "size": 739,
+         "digest": "sha256:133f276ffeafe382c443eb0981c626d3d91948b6bc625d4752ae1c13ca3b3fc8",
+         "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+         }
+      }
+   ]
+}
+```
