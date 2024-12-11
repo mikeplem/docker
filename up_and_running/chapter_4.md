@@ -12,8 +12,7 @@
     - [Amazon Elastic Container Registry](https://gallery.ecr.aws/)
         - May never have as many images that would be found on Docker Hub
         - Not affected by rate limits that we have encountered
-- The order of commands in your Dockerfile can impact the speed of builds. Move the commands that change to the bottom of the Dockerfile. This will limit the number of var DEFAULT_WHO = "World";
-steps that have to be performed on subsequent builds
+- The order of commands in your Dockerfile can impact the speed of builds. Move the commands that change to the bottom of the Dockerfile.
 - It is best to only run a single process inside a container rather that more than one. This makes the container much easier to scale horizontally.
     - For example, do not run a database and frontend application inside the same container
 - If you want to ensure all future Docker builds never use cache, use the `--no-cache` argument on the build command line.
